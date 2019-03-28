@@ -84,7 +84,7 @@ class ElasticsearchCookbook::PluginProvider < Chef::Provider::LWRPBase
     else
       # non-package installations should install plugins as the ES user
       es_user = find_es_resource(run_ctx, :elasticsearch_user, new_resource)
-      shell_out!(command, user: es_user.username, group: es_user.groupname)
+      shell_out!(command)
     end
   end
 end # provider

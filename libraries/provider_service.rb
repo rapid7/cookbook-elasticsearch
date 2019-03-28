@@ -4,7 +4,7 @@ class ElasticsearchCookbook::ServiceProvider < Chef::Provider::LWRPBase
   include ElasticsearchCookbook::Helpers
 
   def whyrun_supported?
-    false
+    true # we only use core Chef resources that also support whyrun
   end
 
   action :remove do
@@ -15,7 +15,8 @@ class ElasticsearchCookbook::ServiceProvider < Chef::Provider::LWRPBase
     es_user = find_es_resource(run_context, :elasticsearch_user, new_resource)
     es_install = find_es_resource(run_context, :elasticsearch_install, new_resource)
     es_conf = find_es_resource(run_context, :elasticsearch_configure, new_resource)
-
+    default_config_name = new_resource.service_name || new_resource.instance_name || es_conf.instance_name || 'elasticsearch'
+    
     d_r = directory es_conf.path_pid[es_install.type] do
       owner es_user.username
       group es_user.groupname
@@ -23,24 +24,56 @@ class ElasticsearchCookbook::ServiceProvider < Chef::Provider::LWRPBase
       recursive true
       action :nothing
     end
+
     d_r.run_action(:create)
     new_resource.updated_by_last_action(true) if d_r.updated_by_last_action?
 
-    # Create service
-    #
-    init_r = template "/etc/init.d/#{new_resource.service_name}" do
-      source new_resource.init_source
-      cookbook new_resource.init_cookbook
+    # Create service for systemd
+
+    systemd_parent_r = directory "/usr/lib/systemd/system-#{default_config_name}" do
+      path '/usr/lib/systemd/system'
+      action :nothing
+      only_if { ::File.exist?('/usr/lib/systemd') }
+    end
+    systemd_parent_r.run_action(:create)
+    new_resource.updated_by_last_action(true) if systemd_parent_r.updated_by_last_action?
+
+    default_conf_dir = %w[rhel amazon].include?(node['platform_family']) ? '/etc/sysconfig' : '/etc/default'
+    systemd_r = template "/usr/lib/systemd/system/#{new_resource.service_name}.service" do
+      source new_resource.systemd_source
+      cookbook new_resource.systemd_cookbook
       owner 'root'
-      mode 0755
+      mode '0644'
       variables(
-        # we need to include something about #{progname} fixed in here.
-        program_name: new_resource.service_name
+          # we need to include something about #{progname} fixed in here.
+          program_name: new_resource.service_name,
+          default_dir: default_conf_dir,
+          path_home: es_conf.path_home,
+          es_user: es_user.username,
+          es_group: es_user.groupname,
+          nofile_limit: es_conf.nofile_limit,
+          install_type: es_install.type
       )
+      only_if 'which systemctl'
       action :nothing
     end
-    init_r.run_action(:create)
-    new_resource.updated_by_last_action(true) if init_r.updated_by_last_action?
+    systemd_r.run_action(:create)
+    # special case here -- must reload unit files if we modified one
+    if systemd_r.updated_by_last_action?
+      new_resource.updated_by_last_action(systemd_r.updated_by_last_action?)
+
+      reload_r = execute "reload-systemd-#{new_resource.service_name}" do
+        command 'systemctl daemon-reload'
+        action :nothing
+        only_if 'which systemctl'
+      end
+      reload_r.run_action(:run)
+    end
+
+    service 'elasticsearch' do
+      action [:enable, :start]
+      provider Chef::Provider::Service::Systemd
+    end
 
     # flatten in an array here, in case the service_actions are a symbol vs. array
     [new_resource.service_actions].flatten.each do |act|
@@ -49,30 +82,29 @@ class ElasticsearchCookbook::ServiceProvider < Chef::Provider::LWRPBase
   end
 
   # Passthrough actions to service[service_name]
-  #
-  action :enable do
-    passthrough_action(:enable)
-  end
+   action :enable do
+     passthrough_action(:enable)
+   end
 
-  action :disable do
-    passthrough_action(:disable)
-  end
+   action :disable do
+     passthrough_action(:disable)
+   end
 
-  action :start do
-    passthrough_action(:start)
-  end
+   action :start do
+     passthrough_action(:start)
+   end
 
-  action :stop do
-    passthrough_action(:stop)
-  end
+   action :stop do
+     passthrough_action(:stop)
+   end
 
-  action :restart do
-    passthrough_action(:restart)
-  end
+   action :restart do
+     passthrough_action(:restart)
+   end
 
-  action :status do
-    passthrough_action(:status)
-  end
+   action :status do
+     passthrough_action(:status)
+   end
 
   def passthrough_action(action)
     svc_r = lookup_service_resource
